@@ -1,6 +1,6 @@
 # !/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Modify: 2024-11-13
+# Modify: 2024-02-17
 # Repo: https://github.com/Cp0204/quark_auto_save
 # ConfigFile: quark_config.json
 """
@@ -163,6 +163,7 @@ class Quark:
         self.nickname = ""
         self.mparam = self._match_mparam_form_cookie(cookie)
         self.savepath_fid = {"/": "0"}
+        self.needremovedpath = []
 
     def _match_mparam_form_cookie(self, cookie):
         mparam = {}
@@ -301,7 +302,7 @@ class Quark:
         else:
             return False, response["message"]
 
-    def get_detail(self, pwd_id, stoken, pdir_fid, _fetch_share=0):
+    def get_detail(self, task, pwd_id, stoken, pdir_fid, _fetch_share=0):
         list_merge = []
         page = 1
         while True:
@@ -322,6 +323,13 @@ class Quark:
             }
             response = self._send_request("GET", url, params=querystring).json()
             if response["data"]["list"]:
+                if task.get("excluded_fid", False):
+                   for item in response["data"]["list"]:
+                        if re.search(task["excluded_fid"], item['fid']):
+                            found = re.search(task["excluded_fid"], item['fid'])
+                            print("忽略转存: 文件夹 “{}”, fid “{}”".format(item['file_name'], found.group()))
+                            response["data"]["list"].remove(item)
+#                print("response[""data""][""list""]:{}".format(response["data"]["list"]))
                 list_merge += response["data"]["list"]
                 page += 1
             else:
@@ -541,6 +549,7 @@ class Quark:
         # 比较创建不存在的
         dir_paths_unexist = list(set(dir_paths) - set(dir_paths_exist) - set(["/"]))
         for dir_path in dir_paths_unexist:
+            print(f"文件夹路径:{dir_path}")
             mkdir_return = self.mkdir(dir_path)
             if mkdir_return["code"] == 0:
                 new_dir = mkdir_return["data"]
@@ -555,11 +564,11 @@ class Quark:
             self.savepath_fid[dir_path["file_path"]] = dir_path["fid"]
         # print(dir_paths_exist_arr)
 
-    def do_save_check(self, shareurl, savepath):
+    def do_save_check(self, task, shareurl, savepath):
         try:
             pwd_id, passcode, pdir_fid = self.get_id_from_url(shareurl)
             is_sharing, stoken = self.get_stoken(pwd_id, passcode)
-            share_file_list = self.get_detail(pwd_id, stoken, pdir_fid)["list"]
+            share_file_list = self.get_detail(task, pwd_id, stoken, pdir_fid)["list"]
             fid_list = [item["fid"] for item in share_file_list]
             fid_token_list = [item["share_fid_token"] for item in share_file_list]
             file_name_list = [item["file_name"] for item in share_file_list]
@@ -598,6 +607,26 @@ class Quark:
             if os.environ.get("DEBUG") == True:
                 print(f"转存测试失败: {str(e)}")
 
+    def do_add_ignore_dir(self, task):
+        #在目标目录里增加需跳过转存的文件夹
+        if task.get("excluded_subdir"):
+            elements = task.get("excluded_subdir").split("|")
+            for element in elements:
+                savepath = re.sub(r"/{2,}", "/", f"/{task['savepath']}/{element}")
+                if not self.get_fids([savepath]):
+                    mkdir_return = self.mkdir(savepath)
+                    if mkdir_return["code"] == 0:
+                        new_dir = mkdir_return["data"]
+                        self.needremovedpath.append(new_dir["fid"])
+               
+    def do_delete_ignore_dir(self):
+        #删除先前由程序自动添加的文件夹
+        if not self.needremovedpath:
+            return None
+        else:
+            self.delete(self.needremovedpath)
+            self.needremovedpath = []
+
     def do_save_task(self, task):
         # 判断资源失效记录
         if task.get("shareurl_ban"):
@@ -627,7 +656,7 @@ class Quark:
     def dir_check_and_save(self, task, pwd_id, stoken, pdir_fid="", subdir_path=""):
         tree = Tree()
         # 获取分享文件列表
-        share_file_list = self.get_detail(pwd_id, stoken, pdir_fid)["list"]
+        share_file_list = self.get_detail(task, pwd_id, stoken, pdir_fid)["list"]
         # print("share_file_list: ", share_file_list)
 
         if not share_file_list:
@@ -642,11 +671,12 @@ class Quark:
         ):  # 仅有一个文件夹
             print("🧠 该分享是一个文件夹，读取文件夹内列表")
             share_file_list = self.get_detail(
-                pwd_id, stoken, share_file_list[0]["fid"]
+                task, pwd_id, stoken, share_file_list[0]["fid"]
             )["list"]
 
         # 获取目标目录文件列表
         savepath = re.sub(r"/{2,}", "/", f"/{task['savepath']}{subdir_path}")
+        #print(f"【debug】savepath:{savepath}")
         if not self.savepath_fid.get(savepath):
             if get_fids := self.get_fids([savepath]):
                 self.savepath_fid[savepath] = get_fids[0]["fid"]
@@ -669,6 +699,7 @@ class Quark:
         need_save_list = []
         # 添加符合的
         for share_file in share_file_list:
+            #print("🎈当前文件名：{}".format(share_file["file_name"]))
             if share_file["dir"] and task.get("update_subdir", False):
                 pattern, replace = task["update_subdir"], ""
             else:
@@ -698,9 +729,11 @@ class Quark:
                     )
                     for dir_file in dir_file_list
                 )
+                   
                 if not file_exists:
                     share_file["save_name"] = save_name
                     need_save_list.append(share_file)
+                    print("✋需要转存的文件或文件夹：{}".format(save_name))
                 elif share_file["dir"]:
                     # 存在并是一个文件夹
                     if task.get("update_subdir", False):
@@ -899,9 +932,15 @@ def do_save(account, tasklist=[]):
                 print(f"忽略后缀: {task['ignore_extension']}")
             if task.get("update_subdir"):
                 print(f"更子目录: {task['update_subdir']}")
+            if task.get("excluded_subdir"):
+                print(f"忽略转存文件夹: {task['excluded_subdir']}")
+            if task.get("excluded_fid"):
+                print(f"忽略转存文件夹或文件fid: {task['excluded_fid']}")
             print()
+            account.do_add_ignore_dir(task)
             is_new_tree = account.do_save_task(task)
             is_rename = account.do_rename_task(task)
+            account.do_delete_ignore_dir()
 
             # 补充任务的插件配置
             def merge_dicts(a, b):
